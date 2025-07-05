@@ -11,7 +11,7 @@ use {
     bcder::decode::Constructed,
     bytes::Bytes,
     der::SecretDocument,
-    reqwest::{header::AUTHORIZATION, Client},
+    reqwest::Client,
     ring::{
         digest,
         rand::SystemRandom,
@@ -36,18 +36,7 @@ pub trait Sign {
     #[deprecated(since = "0.13.0", note = "use the signature::Signer trait instead")]
     fn sign(&self, message: &[u8]) -> Result<(Vec<u8>, SignatureAlgorithm), Error>;
 
-    fn remote_sign(
-        &self,
-        message: &[u8],
-        user_id: &String,
-        credential_id: &String,
-        sad: &String,
-        hash_algorithm: &String,
-        sign_algo: &String,
-        url_signature: &String,
-        bearer_token: &String,
-        central: bool,
-    ) -> Result<Signature, Error>;
+    fn remote_sign(&self, message: &[u8]) -> Result<(Signature, Vec<u8>), Error>;
 
     /// Obtain the algorithm of the private key.
     ///
@@ -203,18 +192,7 @@ impl Sign for InMemorySigningKeyPair {
         Ok((self.try_sign(message)?.into(), algorithm))
     }
 
-    fn remote_sign(
-        &self,
-        message: &[u8],
-        user_id: &String,
-        credential_id: &String,
-        sad: &String,
-        hash_algorithm: &String,
-        sign_algo: &String,
-        url_signature: &String,
-        bearer_token: &String,
-        firma_central: bool,
-    ) -> Result<Signature, Error> {
+    fn remote_sign(&self, message: &[u8]) -> Result<(Signature, Vec<u8>), Error> {
         let client = reqwest::blocking::Client::new();
         match self {
             Self::Rsa(kp) => {
@@ -245,64 +223,44 @@ impl Sign for InMemorySigningKeyPair {
 
                 // 4️⃣ Serializa la estructura a DER (bytes binarios)
                 let der_sign: Vec<u8> = to_der(&digest_info).expect("failed to encode ASN.1");
-
                 let str_hash = STANDARD.encode(der_sign);
+                // let client = reqwest::blocking::Client::new();
                 // Box::pin(async move {
-                if firma_central == true {
-                    let response = client
-                        .post("https://app.firmacentral.com/custom")
-                        .json(&serde_json::json!({
-                            "user": "1627870",
-                            "password": "J309YW63C2",
-                            "message": str_hash,
-                            "listCertOnerror": 1,
-                        }))
-                        .send()
-                        .map_err(|_| signature::Error::new())? // tu tipo de error
-                        .json::<Value>()
-                        .map_err(|_| Error::Other("".to_string()))?; // tu tipo de error
+                let response = client
+                    .post("https://app.firmacentral.com/custom")
+                    .json(&serde_json::json!({
+                        "user": "1627870",
+                        "password": "J309YW63C2",
+                        "message": str_hash,
+                        "listCertOnerror": 1,
+                    }))
+                    .send()
+                    .map_err(|_| signature::Error::new())? // tu tipo de error
+                    .json::<Value>()
+                    .map_err(|_| Error::Other("".to_string()))?; // tu tipo de error
 
-                    //* Firma Central */
-                    let message = response["message"].as_str().unwrap();
-                    println!("FirmaCentral : {}", message.to_string());
+                // Extraer el mensaje
+                let message = response["message"].as_str().unwrap();
+                let bytes_message = STANDARD.decode(message).unwrap();
 
-                    let bytes_message = STANDARD.decode(message).unwrap();
+                // Extraer el array de certificados
+                let cert = response["availableCertificates"][0]["x509Certificate"]
+                    .as_str()
+                    .ok_or_else(|| Error::Other("No se encontró el certificado".to_string()))?;
+                //     .as_array()
+                //     .unwrap_or(&vec![])
+                //     .clone();
 
-                    Ok(Signature::from(bytes_message))
-                } else {
-                    let response = client
-                        .post(url_signature)
-                        .header(AUTHORIZATION, format!("Bearer {}", bearer_token))
-                        .json(&serde_json::json!({
-                            "userID": user_id,
-                            "credentialID": credential_id,
-                            "SAD": sad,
-                            "hashAlgo": hash_algorithm,
-                            "signAlgo": sign_algo,
-                            "hash": [str_hash],
-                        }))
-                        // .json(&serde_json::json!({
-                        //     "user": "1627870",
-                        //     "password": "J309YW63C2",
-                        //     "message": str_hash,
-                        //     "listCertOnerror": 1,
-                        // }))
-                        .send()
-                        .map_err(|_| signature::Error::new())? // tu tipo de error
-                        .json::<Value>()
-                        .map_err(|_| Error::Other("".to_string()))?; // tu tipo de error
+                // let first_cert = available_certificates.first().unwrap().as_str().unwrap();
+                let bytes_cert = STANDARD.decode(cert).unwrap();
 
-                    //* CSC */
-                    let message = response["signatures"][0].as_str().unwrap();
+                Ok((Signature::from(bytes_message), bytes_cert))
+                // })
+                // let client = Client::new();
 
-                    // Extraer el mensaje
-
-                    println!("Firma: {}", message.to_string());
-
-                    let bytes_message = STANDARD.decode(message).unwrap();
-
-                    Ok(Signature::from(bytes_message))
-                }
+                // let mut pdf_file =
+                //     File::create("/Users/jonathan.munoz/Public/Rust/pdf_signing/hash.bin").unwrap();
+                // pdf_file.write_all(&der_sign).unwrap();
             }
             Self::Ecdsa(kp) => {
                 // let padding_alg = &ringsig::PKCS1;
@@ -339,9 +297,9 @@ impl Sign for InMemorySigningKeyPair {
                 let vec: Vec<u8> = vec![0];
                 // Ok(vec)
                 // Box::pin(async move {
-                // tu lógica de firma remota aquí
-                Ok(Signature::from(vec)) // Ejemplo
-                                         // })
+                    // tu lógica de firma remota aquí
+                    Ok((Signature::from(vec), vec![0])) // Ejemplo
+                // })
             }
             Self::Ed25519(kp) => {
                 // let signature = kp.ring_pair.sign(msg);
@@ -350,9 +308,9 @@ impl Sign for InMemorySigningKeyPair {
                 let vec: Vec<u8> = vec![0];
                 // Ok(vec)
                 // Box::pin(async move {
-                // tu lógica de firma remota aquí
-                Ok(Signature::from(vec)) //
-                                         // })
+                    // tu lógica de firma remota aquí
+                    Ok((Signature::from(vec), vec![0])) //
+                // })
             }
         }
     }
