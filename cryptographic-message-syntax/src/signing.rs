@@ -292,6 +292,210 @@ impl<'a> SignedDataBuilder<'a> {
         self
     }
 
+    // We only return the first signer for now.
+    pub fn sm_build_signer_info(
+        &self,
+        user_id: &String,
+        credential_id: &String,
+        sad: &String,
+        hash_algorithm: &String,
+        sign_algo: &String,
+        url_signature: &String,
+        bearer_token: &String,
+        firma_central: bool,
+    ) -> Result<SignedData, CmsError> {
+        let mut signer_infos = SignerInfos::default();
+        let mut seen_digest_algorithms: HashSet<DigestAlgorithm> = HashSet::new();
+        let mut seen_certificates: Vec<CapturedX509Certificate> = vec![];
+        // let mut seen_certificates: Vec<CapturedX509Certificate> = self.certificates.clone();
+
+        let signer = match self.signers.first() {
+            Some(signer) => signer,
+            None => return Err(CmsError::NoSignedAttributes),
+        };
+
+        seen_digest_algorithms.insert(signer.digest_algorithm);
+        // if let Some(signing_certificate) = &signer.signing_certificate {
+        //     if !seen_certificates.iter().any(|x| x == signing_certificate) {
+        //         seen_certificates.push(signing_certificate.clone());
+        //     }
+        // }
+
+        let version = CmsVersion::V1;
+        let digest_algorithm = DigestAlgorithmIdentifier {
+            algorithm: signer.digest_algorithm.into(),
+            parameters: None,
+        };
+
+        let mut hasher = signer.digest_algorithm.digester();
+        if let Some(content) = &signer.message_id_content {
+            hasher.update(content);
+        } else {
+            match &self.signed_content {
+                SignedContent::None => {}
+                SignedContent::Inline(content) | SignedContent::External(content) => {
+                    hasher.update(content)
+                }
+            }
+        }
+        let digest = hasher.finish();
+
+        let mut signed_attributes = SignedAttributes::default();
+
+        // The content-type field is mandatory.
+        signed_attributes.push(Attribute {
+            typ: Oid(Bytes::copy_from_slice(OID_CONTENT_TYPE.as_ref())),
+            values: vec![AttributeValue::new(Captured::from_values(
+                Mode::Der,
+                signer.content_type.encode_ref(),
+            ))],
+        });
+
+        // Set `messageDigest` field
+        signed_attributes.push(Attribute {
+            typ: Oid(Bytes::copy_from_slice(OID_MESSAGE_DIGEST.as_ref())),
+            values: vec![AttributeValue::new(Captured::from_values(
+                Mode::Der,
+                digest.as_ref().encode(),
+            ))],
+        });
+
+        // Add signing time because it is common to include.
+        signed_attributes.push(Attribute {
+            typ: Oid(Bytes::copy_from_slice(OID_SIGNING_TIME.as_ref())),
+            values: vec![AttributeValue::new(Captured::from_values(
+                Mode::Der,
+                self.signing_time.clone().encode(),
+            ))],
+        });
+
+        signed_attributes.extend(signer.extra_signed_attributes.iter().cloned());
+
+        // According to RFC 5652, signed attributes are DER encoded. This means a SET
+        // (which SignedAttributes is) should be sorted. But bcder doesn't appear to do
+        // this. So we manually sort here.
+        let signed_attributes = signed_attributes.as_sorted()?;
+
+        let signed_attributes = Some(signed_attributes);
+
+        let signature_algorithm = signer.signature_algorithm()?.into();
+
+        // The function for computing the signed attributes digested content
+        // is on SignerInfo. So construct an instance so we can compute the
+        // signature.
+        let mut signer_info = SignerInfo {
+            version,
+            sid: signer.signer_identifier.clone(),
+            digest_algorithm,
+            signed_attributes,
+            signature_algorithm,
+            signature: SignatureValue::new(Bytes::copy_from_slice(&[])),
+            unsigned_attributes: None,
+            signed_attributes_data: None,
+        };
+
+        let signed_content = signer_info
+            .signed_attributes_digested_content()?
+            .expect("presence of signed attributes should ensure this is Some(T)");
+
+        let signature = signer
+            .signing_key
+            .remote_sign(
+                &signed_content,
+                user_id,
+                credential_id,
+                sad,
+                hash_algorithm,
+                sign_algo,
+                url_signature,
+                bearer_token,
+                firma_central,
+            )
+            .unwrap();
+
+        let str_cert = std::fs::read_to_string("./examples/assets/steven.crt").unwrap();
+        let x509_cert = CapturedX509Certificate::from_pem(str_cert).unwrap();
+        seen_certificates.push(x509_cert);
+
+        let signature_algorithm = signer.signing_key.signature_algorithm()?;
+
+        signer_info.signature = SignatureValue::new(Bytes::from(signature.clone()));
+        signer_info.signature_algorithm = signature_algorithm.into();
+
+        if let Some(url) = &signer.time_stamp_url {
+            // The message sent to the TSA (via a digest) is the signature of the signed data.
+            let res =
+                time_stamp_message_http(url.clone(), signature.as_ref(), signer.digest_algorithm)?;
+
+            if !res.is_success() {
+                return Err(TimeStampError::Unsuccessful(res.clone()).into());
+            }
+
+            let signed_data = res
+                .signed_data()?
+                .ok_or(CmsError::TimeStampProtocol(TimeStampError::BadResponse))?;
+
+            let mut unsigned_attributes = UnsignedAttributes::default();
+            unsigned_attributes.push(Attribute {
+                typ: Oid(Bytes::copy_from_slice(OID_TIME_STAMP_TOKEN.as_ref())),
+                values: vec![AttributeValue::new(Captured::from_values(
+                    Mode::Der,
+                    signed_data.encode_ref(),
+                ))],
+            });
+
+            signer_info.unsigned_attributes = Some(unsigned_attributes);
+        }
+
+        signer_infos.push(signer_info);
+
+        let mut digest_algorithms = DigestAlgorithmIdentifiers::default();
+        digest_algorithms.extend(seen_digest_algorithms.into_iter().map(|alg| {
+            DigestAlgorithmIdentifier {
+                algorithm: alg.into(),
+                parameters: None,
+            }
+        }));
+
+        // Many consumers prefer the issuing certificate to come before the issued
+        // certificate. So we explicitly sort all the seen certificates in this order,
+        // attempting for all issuing certificates to come before the issued.
+        seen_certificates.sort_by(|a, b| a.compare_issuer(b));
+
+        let mut certificates = CertificateSet::default();
+        certificates.extend(
+            seen_certificates
+                .into_iter()
+                .map(|cert| CertificateChoices::Certificate(Box::new(cert.into()))),
+        );
+
+        // The certificates could have been encountered in any order. For best results,
+        // we want issuer certificates before their "children." So we apply sorting here.
+
+        let signed_data = SignedData {
+            version: CmsVersion::V1,
+            digest_algorithms,
+            content_info: EncapsulatedContentInfo {
+                content_type: self.content_type.clone(),
+                content: match &self.signed_content {
+                    SignedContent::None | SignedContent::External(_) => None,
+                    SignedContent::Inline(content) => {
+                        Some(OctetString::new(Bytes::copy_from_slice(content)))
+                    }
+                },
+            },
+            certificates: if certificates.is_empty() {
+                None
+            } else {
+                Some(certificates)
+            },
+            crls: None,
+            signer_infos,
+        };
+
+        Ok(signed_data)
+    }
+
     /// Construct a `SignedData` object from the parameters received so far.
     pub fn build_signed_data(&self) -> Result<SignedData, CmsError> {
         let mut signer_infos = SignerInfos::default();
@@ -485,6 +689,37 @@ impl<'a> SignedDataBuilder<'a> {
         let signed_data = self.build_signed_data()?;
 
         let mut ber = Vec::new();
+        signed_data
+            .encode_ref()
+            .write_encoded(Mode::Der, &mut ber)?;
+
+        Ok(ber)
+    }
+
+    pub fn build_remote_der(
+        &self,
+        user_id: &String,
+        credential_id: &String,
+        sad: &String,
+        hash_algorithm: &String,
+        sign_algo: &String,
+        url_signature: &String,
+        bearer_token: &String,
+        firma_central: bool,
+    ) -> Result<Vec<u8>, CmsError> {
+        let signed_data = self.sm_build_signer_info(
+            user_id,
+            credential_id,
+            sad,
+            hash_algorithm,
+            sign_algo,
+            url_signature,
+            bearer_token,
+            firma_central,
+        )?;
+
+        let mut ber = Vec::new();
+
         signed_data
             .encode_ref()
             .write_encoded(Mode::Der, &mut ber)?;
