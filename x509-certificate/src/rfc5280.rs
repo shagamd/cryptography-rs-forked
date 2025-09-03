@@ -8,8 +8,7 @@ use {
     crate::{asn1time::*, rfc3280::*},
     bcder::{
         decode::{BytesSource, Constructed, DecodeError, IntoSource, Source},
-        encode,
-        encode::{PrimitiveContent, Values},
+        encode::{self, PrimitiveContent, Values},
         BitString, Captured, Integer, Mode, OctetString, Oid, Tag,
     },
     bytes::Bytes,
@@ -82,15 +81,29 @@ impl AlgorithmIdentifier {
 
         encode::sequence((self.algorithm.clone().encode(), captured))
     }
+
+    fn encoded_values_without_parameters(&self) -> impl Values + '_ {
+        encode::sequence(self.algorithm.clone().encode())
+    }
 }
 
 impl Values for AlgorithmIdentifier {
     fn encoded_len(&self, mode: Mode) -> usize {
-        self.encoded_values(mode).encoded_len(mode)
+        if let Some(_params) = self.parameters.as_ref() {
+            self.encoded_values(mode).encoded_len(mode)
+        } else {
+            self.encoded_values_without_parameters()
+                .encoded_len(mode)
+        }
     }
 
     fn write_encoded<W: Write>(&self, mode: Mode, target: &mut W) -> Result<(), std::io::Error> {
-        self.encoded_values(mode).write_encoded(mode, target)
+        if let Some(_params) = self.parameters.as_ref() {
+            self.encoded_values(mode).write_encoded(mode, target)
+        } else {
+            self.encoded_values_without_parameters()
+                .write_encoded(mode, target)
+        }
     }
 }
 

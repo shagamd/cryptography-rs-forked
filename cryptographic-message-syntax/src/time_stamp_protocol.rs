@@ -12,6 +12,7 @@ use {
         },
         rfc5652::{SignedData, OID_ID_SIGNED_DATA},
     },
+    base64::{engine::general_purpose::STANDARD, Engine as _},
     bcder::{
         decode::{Constructed, DecodeError, IntoSource, Source},
         encode::Values,
@@ -19,6 +20,7 @@ use {
     },
     reqwest::IntoUrl,
     ring::rand::SecureRandom,
+    serde_json::Value,
     std::{convert::Infallible, ops::Deref},
     x509_certificate::DigestAlgorithm,
 };
@@ -156,19 +158,39 @@ impl From<TimeStampResp> for TimeStampResponse {
 pub fn time_stamp_request_http(
     url: impl IntoUrl,
     request: &TimeStampReq,
+    username_auth: Option<&str>,
+    password_auth: Option<&str>,
 ) -> Result<TimeStampResponse, TimeStampError> {
     let client = reqwest::blocking::Client::new();
+
+    // Codificar auth si ambos están presentes
+    let auth_header_value = match (username_auth, password_auth) {
+        (Some(username), Some(password)) => {
+            let auth = format!("{}:{}", username, password);
+            let encoded_auth = STANDARD.encode(auth.as_bytes());
+            Some(format!("Basic {}", encoded_auth))
+        }
+        _ => None,
+    };
 
     let mut body = Vec::<u8>::new();
     request
         .encode_ref()
         .write_encoded(bcder::Mode::Der, &mut body)?;
 
-    let response = client
+    let mut request_builder = client
         .post(url)
         .header("Content-Type", HTTP_CONTENT_TYPE_REQUEST)
-        .body(body)
-        .send()?;
+        .body(body);
+    // Agregar el header Authorization solo si está
+    if let Some(auth) = &auth_header_value {
+        // println!("Auth: {}", auth);
+        request_builder = request_builder.header("Authorization", auth);
+    }
+
+    let response = request_builder.send()?;
+
+    // println!("Response Status: {}", response.status());
 
     if response.status().is_success()
         && response.headers().get("Content-Type")
@@ -195,6 +217,7 @@ pub fn time_stamp_request_http(
 
         Ok(res)
     } else {
+        println!("Response Error Body: {}", response.json::<Value>().unwrap());
         Err(TimeStampError::Http("bad HTTP response"))
     }
 }
@@ -207,6 +230,8 @@ pub fn time_stamp_message_http(
     url: impl IntoUrl,
     message: &[u8],
     digest_algorithm: DigestAlgorithm,
+    username_auth: Option<&str>,
+    password_auth: Option<&str>,
 ) -> Result<TimeStampResponse, TimeStampError> {
     let mut h = digest_algorithm.digester();
     h.update(message);
@@ -229,7 +254,7 @@ pub fn time_stamp_message_http(
         extensions: None,
     };
 
-    time_stamp_request_http(url, &request)
+    time_stamp_request_http(url, &request, username_auth, password_auth)
 }
 
 #[cfg(test)]
@@ -257,7 +282,7 @@ mod test {
     fn simple_request() {
         let message = b"hello, world";
 
-        let res = time_stamp_message_http(DIGICERT_TIMESTAMP_URL, message, DigestAlgorithm::Sha256)
+        let res = time_stamp_message_http(DIGICERT_TIMESTAMP_URL, message, DigestAlgorithm::Sha256, None, None)
             .unwrap();
 
         let signed_data = res.signed_data().unwrap().unwrap();

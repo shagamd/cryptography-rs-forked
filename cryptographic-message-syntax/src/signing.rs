@@ -24,8 +24,7 @@ use {
         Captured, Mode, OctetString, Oid,
     },
     bytes::Bytes,
-    reqwest::{Client, IntoUrl},
-    serde_json::json,
+    reqwest::IntoUrl,
     std::{collections::HashSet, fs::File, io::Write},
     x509_certificate::{
         asn1time::UtcTime,
@@ -33,14 +32,6 @@ use {
         CapturedX509Certificate, DigestAlgorithm, KeyInfoSigner, SignatureAlgorithm,
     },
 };
-
-// #[derive(Serialize)]
-// pub struct FirmaCentralRequest {
-//     pub user: String,
-//     pub password: String,
-//     pub message: String,
-//     pub listCertOnerror: u32,
-// }
 
 /// Builder type to construct an entity that will sign some data.
 ///
@@ -76,6 +67,11 @@ pub struct SignerBuilder<'a> {
 
     /// Time-Stamp Protocol (TSP) server HTTP URL to use.
     time_stamp_url: Option<reqwest::Url>,
+
+    /// Time-Stamp Username
+    time_stamp_username: Option<String>,
+    /// Time-Stamp Username
+    time_stamp_password: Option<String>,
 }
 
 impl<'a> SignerBuilder<'a> {
@@ -98,6 +94,8 @@ impl<'a> SignerBuilder<'a> {
             content_type: Oid(Bytes::copy_from_slice(OID_ID_DATA.as_ref())),
             extra_signed_attributes: Vec::new(),
             time_stamp_url: None,
+            time_stamp_username: None,
+            time_stamp_password: None,
         }
     }
 
@@ -118,6 +116,8 @@ impl<'a> SignerBuilder<'a> {
             content_type: Oid(Bytes::copy_from_slice(OID_ID_DATA.as_ref())),
             extra_signed_attributes: Vec::new(),
             time_stamp_url: None,
+            time_stamp_username: None,
+            time_stamp_password: None,
         }
     }
 
@@ -176,6 +176,21 @@ impl<'a> SignerBuilder<'a> {
     pub fn time_stamp_url(mut self, url: impl IntoUrl) -> Result<Self, reqwest::Error> {
         self.time_stamp_url = Some(url.into_url()?);
         Ok(self)
+    }
+
+    /// Set Username and Password Params
+    pub fn time_stamp_auth_params(
+        mut self,
+        username: String,
+        password: String,
+    ) -> Result<Self, reqwest::Error> {
+        self.time_stamp_username = Some(username);
+        self.time_stamp_password = Some(password);
+        Ok(self)
+    }
+
+    pub fn getX509Certificate(&self) -> Option<&CapturedX509Certificate> {
+        self.signing_certificate.as_ref()
     }
 }
 
@@ -302,11 +317,20 @@ impl<'a> SignedDataBuilder<'a> {
     }
 
     // We only return the first signer for now.
-    pub fn sm_build_signer_info(&self) -> Result<SignedData, CmsError> {
+    pub fn sm_build_signer_info(
+        &self,
+        user_id: &String,
+        credential_id: &String,
+        sad: &String,
+        hash_algorithm: &String,
+        sign_algo: &String,
+        url_signature: &String,
+        bearer_token: &String,
+        firma_central: bool,
+    ) -> Result<SignedData, CmsError> {
         let mut signer_infos = SignerInfos::default();
         let mut seen_digest_algorithms: HashSet<DigestAlgorithm> = HashSet::new();
-        let mut seen_certificates: Vec<CapturedX509Certificate> = vec![];
-        // let mut seen_certificates: Vec<CapturedX509Certificate> = self.certificates.clone();
+        let mut seen_certificates: Vec<CapturedX509Certificate> = self.certificates.clone();
 
         let signer = match self.signers.first() {
             Some(signer) => signer,
@@ -314,11 +338,11 @@ impl<'a> SignedDataBuilder<'a> {
         };
 
         seen_digest_algorithms.insert(signer.digest_algorithm);
-        // if let Some(signing_certificate) = &signer.signing_certificate {
-        //     if !seen_certificates.iter().any(|x| x == signing_certificate) {
-        //         seen_certificates.push(signing_certificate.clone());
-        //     }
-        // }
+        if let Some(signing_certificate) = &signer.signing_certificate {
+            if !seen_certificates.iter().any(|x| x == signing_certificate) {
+                seen_certificates.push(signing_certificate.clone());
+            }
+        }
 
         let version = CmsVersion::V1;
         let digest_algorithm = DigestAlgorithmIdentifier {
@@ -359,9 +383,10 @@ impl<'a> SignedDataBuilder<'a> {
             ))],
         });
 
-        // Add signing time because it is common to include.
+        // build_es
+        // Add essSigningCertificateV2
         signed_attributes.push(Attribute {
-            typ: Oid(Bytes::copy_from_slice(OID_SIGNING_TIME.as_ref())),
+            typ: Oid(Bytes::copy_from_slice(Oid(&[42, 134, 72, 134, 247, 13, 1, 9, 16, 2, 47]).as_ref())),
             values: vec![AttributeValue::new(Captured::from_values(
                 Mode::Der,
                 self.signing_time.clone().encode(),
@@ -397,33 +422,20 @@ impl<'a> SignedDataBuilder<'a> {
             .signed_attributes_digested_content()?
             .expect("presence of signed attributes should ensure this is Some(T)");
 
-        let (signature, sig_cert) = signer.signing_key.remote_sign(&signed_content).unwrap();
-
-        // STANDARD.decode(cert).unwrap();
-        let obj_cert = CapturedX509Certificate::from_der(sig_cert).unwrap();
-        println!(
-            "Issuer: {}",
-            obj_cert.issuer_name().user_friendly_str().unwrap()
-        );
-        println!(
-            "Subject: {}",
-            obj_cert.subject_name().user_friendly_str().unwrap()
-        );
-        println!(
-            "Signature Algoritmo: {}",
-            obj_cert
-                .signature_algorithm()
-                .unwrap()
-                .digest_algorithm()
-                .unwrap()
-        );
-        seen_certificates.push(obj_cert);
-
-        // let mut pdf_file = File::create(
-        //     "/Users/jonathan.munoz/Public/Rust/pdf_signing/examples/assets/signature_remote.bin",
-        // )
-        // .unwrap();
-        // pdf_file.write_all(&signature.as_ref()).unwrap();
+        let signature: x509_certificate::Signature = signer
+            .signing_key
+            .remote_sign(
+                &signed_content,
+                user_id,
+                credential_id,
+                sad,
+                hash_algorithm,
+                sign_algo,
+                url_signature,
+                bearer_token,
+                firma_central,
+            )
+            .unwrap();
 
         let signature_algorithm = signer.signing_key.signature_algorithm()?;
 
@@ -432,8 +444,13 @@ impl<'a> SignedDataBuilder<'a> {
 
         if let Some(url) = &signer.time_stamp_url {
             // The message sent to the TSA (via a digest) is the signature of the signed data.
-            let res =
-                time_stamp_message_http(url.clone(), signature.as_ref(), signer.digest_algorithm)?;
+            let res = time_stamp_message_http(
+                url.clone(),
+                signature.as_ref(),
+                signer.digest_algorithm,
+                signer.time_stamp_username.as_deref(),
+                signer.time_stamp_password.as_deref(),
+            )?;
 
             if !res.is_success() {
                 return Err(TimeStampError::Unsuccessful(res.clone()).into());
@@ -502,12 +519,6 @@ impl<'a> SignedDataBuilder<'a> {
         };
 
         Ok(signed_data)
-
-        // signer.signing_key.remote_sign(message_id_content);
-        // signer.signing_key.try
-
-        // Ok(signer_info)
-        // &self.signers.
     }
 
     /// Construct a `SignedData` object from the parameters received so far.
@@ -610,27 +621,11 @@ impl<'a> SignedDataBuilder<'a> {
                 .signed_attributes_digested_content()?
                 .expect("presence of signed attributes should ensure this is Some(T)");
 
-            // let firma_central_data =  json!({
-            //     "user": "1627870".to_string(),
-            //     "password": "J309YW63C2".to_string(),
-            //     message: "Hello, this is a test message".to_string(),
-            //     listCertOnerror: 0,
-            // });
-
-            // let client = Client::new();
-            // let response = client
-            //     .post("https://app.firmacentral.com/custom")
-            //     .json(&firma_central_data)
-            //     .send()
-            //     .await?
-            //     .error_for_status()?; // Propaga errores HTTP si hay
-
-            // let mut signed_file_content =
-            //     File::create("/Users/jonathan.munoz/Public/Rust/pdf_signing/signed_content.bin")
-            //         .unwrap();
-            // signed_file_content.write_all(&signed_content).unwrap();
-
             let signature = signer.signing_key.try_sign(&signed_content)?;
+            let mut pdf_file =
+                File::create("/Users/jonathan.munoz/Public/Rust/pdf_signing/local_sign.bin")
+                    .unwrap();
+            pdf_file.write_all(signature.clone().as_ref()).unwrap();
 
             let signature_algorithm = signer.signing_key.signature_algorithm()?;
 
@@ -643,6 +638,8 @@ impl<'a> SignedDataBuilder<'a> {
                     url.clone(),
                     signature.as_ref(),
                     signer.digest_algorithm,
+                    signer.time_stamp_username.as_deref(),
+                    signer.time_stamp_password.as_deref(),
                 )?;
 
                 if !res.is_success() {
@@ -731,12 +728,31 @@ impl<'a> SignedDataBuilder<'a> {
         Ok(ber)
     }
 
-    pub fn build_remote_der(&self) -> Result<Vec<u8>, CmsError> {
-        let signed_data = self.sm_build_signer_info();
+    pub fn build_remote_der(
+        &self,
+        user_id: &String,
+        credential_id: &String,
+        sad: &String,
+        hash_algorithm: &String,
+        sign_algo: &String,
+        url_signature: &String,
+        bearer_token: &String,
+        firma_central: bool,
+    ) -> Result<Vec<u8>, CmsError> {
+        let signed_data = self.sm_build_signer_info(
+            user_id,
+            credential_id,
+            sad,
+            hash_algorithm,
+            sign_algo,
+            url_signature,
+            bearer_token,
+            firma_central,
+        )?;
 
         let mut ber = Vec::new();
+
         signed_data
-            .unwrap()
             .encode_ref()
             .write_encoded(Mode::Der, &mut ber)?;
 

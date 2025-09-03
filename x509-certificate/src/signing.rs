@@ -11,16 +11,15 @@ use {
     bcder::decode::Constructed,
     bytes::Bytes,
     der::SecretDocument,
-    reqwest::Client,
+    reqwest::header::AUTHORIZATION,
     ring::{
-        digest,
+        digest::{self, SHA256, SHA384},
         rand::SystemRandom,
         signature::{self as ringsig, KeyPair, RsaEncoding},
     },
     serde_json::Value,
     signature::{SignatureEncoding as SignatureTrait, Signer},
     simple_asn1::{to_der, ASN1Block, BigUint, OID},
-    std::{fs::File, future::Future, io::Write, pin::Pin},
     zeroize::Zeroizing,
 };
 
@@ -36,7 +35,18 @@ pub trait Sign {
     #[deprecated(since = "0.13.0", note = "use the signature::Signer trait instead")]
     fn sign(&self, message: &[u8]) -> Result<(Vec<u8>, SignatureAlgorithm), Error>;
 
-    fn remote_sign(&self, message: &[u8]) -> Result<(Signature, Vec<u8>), Error>;
+    fn remote_sign(
+        &self,
+        message: &[u8],
+        user_id: &String,
+        credential_id: &String,
+        sad: &String,
+        hash_algorithm: &String,
+        sign_algo: &String,
+        url_signature: &String,
+        bearer_token: &String,
+        central: bool,
+    ) -> Result<Signature, Error>;
 
     /// Obtain the algorithm of the private key.
     ///
@@ -192,10 +202,21 @@ impl Sign for InMemorySigningKeyPair {
         Ok((self.try_sign(message)?.into(), algorithm))
     }
 
-    fn remote_sign(&self, message: &[u8]) -> Result<(Signature, Vec<u8>), Error> {
+    fn remote_sign(
+        &self,
+        message: &[u8],
+        user_id: &String,
+        credential_id: &String,
+        sad: &String,
+        hash_algorithm: &String,
+        sign_algo: &String,
+        url_signature: &String,
+        bearer_token: &String,
+        firma_central: bool,
+    ) -> Result<Signature, Error> {
         let client = reqwest::blocking::Client::new();
         match self {
-            Self::Rsa(kp) => {
+            Self::Rsa(_kp) => {
                 let padding_alg: &'static dyn RsaEncoding = &ringsig::RSA_PKCS1_SHA256;
                 let m_hash = digest::digest(&padding_alg.digest_alg(), message);
                 //*Digest Crudo */
@@ -224,93 +245,194 @@ impl Sign for InMemorySigningKeyPair {
                 // 4️⃣ Serializa la estructura a DER (bytes binarios)
                 let der_sign: Vec<u8> = to_der(&digest_info).expect("failed to encode ASN.1");
                 let str_hash = STANDARD.encode(der_sign);
-                // let client = reqwest::blocking::Client::new();
-                // Box::pin(async move {
-                let response = client
-                    .post("https://app.firmacentral.com/custom")
-                    .json(&serde_json::json!({
-                        "user": "1627870",
-                        "password": "J309YW63C2",
-                        "message": str_hash,
-                        "listCertOnerror": 1,
-                    }))
-                    .send()
-                    .map_err(|_| signature::Error::new())? // tu tipo de error
-                    .json::<Value>()
-                    .map_err(|_| Error::Other("".to_string()))?; // tu tipo de error
 
-                // Extraer el mensaje
-                let message = response["message"].as_str().unwrap();
-                let bytes_message = STANDARD.decode(message).unwrap();
+                println!("Hash enviado a firmar RSA QA = {}", str_hash);
+                if firma_central == true {
+                    println!("Entramos a firmar por RSA QA");
+                    let response = client
+                        .post("https://certstest.pkipaynet.com.co/custom")
+                        // .post("https://app.firmacentral.com/custom")
+                        .json(&serde_json::json!({
+                            // // RSA PROD
+                            // "user": "1627870",
+                            // "password": "J309YW63C2",
+                            // "message": str_hash,
+                            // "listCertOnerror": 1,
 
-                // Extraer el array de certificados
-                let cert = response["availableCertificates"][0]["x509Certificate"]
-                    .as_str()
-                    .ok_or_else(|| Error::Other("No se encontró el certificado".to_string()))?;
-                //     .as_array()
-                //     .unwrap_or(&vec![])
-                //     .clone();
+                            // //QA
+                            "user": "107247",
+                            "password": "N8R7H43RNR",
+                            "message": str_hash,
+                            "listCertOnerror": 1,
+                        }))
+                        .send()
+                        .map_err(|_| signature::Error::new())? // tu tipo de error
+                        .json::<Value>()
+                        .map_err(|_| Error::Other("".to_string()))?; // tu tipo de error
 
-                // let first_cert = available_certificates.first().unwrap().as_str().unwrap();
-                let bytes_cert = STANDARD.decode(cert).unwrap();
+                    //* Firma Central */
+                    let message = response["message"].as_str().unwrap();
+                    println!("Hash firmado FirmaCentral = {}", message);
 
-                Ok((Signature::from(bytes_message), bytes_cert))
-                // })
-                // let client = Client::new();
+                    let bytes_message = STANDARD.decode(message).unwrap();
 
-                // let mut pdf_file =
-                //     File::create("/Users/jonathan.munoz/Public/Rust/pdf_signing/hash.bin").unwrap();
-                // pdf_file.write_all(&der_sign).unwrap();
+                    Ok(Signature::from(bytes_message))
+                } else {
+                    // println!(
+                    //     "Hash enviado a firmar RSA QA = {}",
+                    //     &serde_json::json!({
+                    //         "userID": user_id,
+                    //         "credentialID": credential_id,
+                    //         "SAD": sad,
+                    //         "hashAlgorithmOID": hash_algorithm,
+                    //         "signAlgo": sign_algo,
+                    //         "hashes": [str_hash],
+                    //     })
+                    // );
+                    let response = client
+                        .post(url_signature)
+                        .header(AUTHORIZATION, format!("Bearer {}", bearer_token))
+                        .json(&serde_json::json!({
+                            "userID": user_id,
+                            "credentialID": credential_id,
+                            "SAD": sad,
+                            "hashAlgorithmOID": hash_algorithm,
+                            "signAlgo": sign_algo,
+                            "hashes": [str_hash],
+                        }))
+                        // .json(&serde_json::json!({
+                        //     "user": "1627870",
+                        //     "password": "J309YW63C2",
+                        //     "message": str_hash,
+                        //     "listCertOnerror": 1,
+                        // }))
+                        .send()
+                        .map_err(|_| signature::Error::new())? // tu tipo de error
+                        .json::<Value>()
+                        .map_err(|_| Error::Other("".to_string()))?; // tu tipo de error
+
+                    //* CSC */
+                    let message = response["signatures"][0].as_str().unwrap();
+
+                    let bytes_message = STANDARD.decode(message).unwrap();
+                    // let mut pdf_file = File::create(
+                    //     "/Users/jonathan.munoz/Public/Rust/pdf_signing/signature_csc.bin",
+                    // )
+                    // .unwrap();
+                    // pdf_file.write_all(&bytes_message).unwrap();
+
+                    Ok(Signature::from(bytes_message))
+                }
             }
-            Self::Ecdsa(kp) => {
-                // let padding_alg = &ringsig::PKCS1;
-                // let m_hash = digest::digest(&padding_alg.digest_alg(), message);
-                // //*Digest Crudo */
-                // let hash = m_hash.as_ref();
+            Self::Ecdsa(_kp) => {
+                let m_hash = digest::digest(&SHA256, message);
+                //*Digest Crudo */
+                let hash = m_hash.as_ref();
 
-                // let sha256_oid = OID::new(vec![
-                //     BigUint::from(2u32),
-                //     BigUint::from(16u32),
-                //     BigUint::from(840u32),
-                //     BigUint::from(1u32),
-                //     BigUint::from(101u32),
-                //     BigUint::from(3u32),
-                //     BigUint::from(4u32),
-                //     BigUint::from(2u32),
-                //     BigUint::from(1u32),
-                // ]);
+                let str_hash = STANDARD.encode(hash);
+                if firma_central == true {
+                    let response = client
+                        // .post("https://certstest.pkipaynet.com.co/custom")
+                        .post("https://app.firmacentral.com/custom")
+                        .json(&serde_json::json!({
+                            "user": "CDX407804",
+                            "password": "46rwKXxz",
+                            "message": str_hash,
+                            "listCertOnerror": 1,
+                        }))
+                        // .json(&serde_json::json!({
+                        //     "user": "MS22734",
+                        //     "password": "Kaj5JJrd",
+                        //     "message": str_hash,
+                        //     "listCertOnerror": 1,
+                        // }))
+                        .send()
+                        .map_err(|_| signature::Error::new())? // tu tipo de error
+                        .json::<Value>()
+                        .map_err(|_| Error::Other("".to_string()))?; // tu tipo de error
 
-                // let digest_info = ASN1Block::Sequence(
-                //     0,
-                //     vec![
-                //         ASN1Block::Sequence(0, vec![ASN1Block::ObjectIdentifier(0, sha256_oid)]),
-                //         ASN1Block::OctetString(0, hash.to_vec()),
-                //     ],
-                // );
+                    //* Firma Central */
+                    let message = response["message"].as_str().unwrap();
 
-                // // 4️⃣ Serializa la estructura a DER (bytes binarios)
-                // let der_sign: Vec<u8> = to_der(&digest_info).expect("failed to encode ASN.1");
+                    let bytes_message = STANDARD.decode(message).unwrap();
 
-                // let mut pdf_file =
-                //     File::create("/Users/jonathan.munoz/Public/Rust/pdf_signing/hash.bin").unwrap();
-                // pdf_file.write_all(&der_sign).unwrap();
-                let vec: Vec<u8> = vec![0];
-                // Ok(vec)
-                // Box::pin(async move {
-                    // tu lógica de firma remota aquí
-                    Ok((Signature::from(vec), vec![0])) // Ejemplo
-                // })
+                    if bytes_message.len() != 64 {
+                        Error::Other("tamano de firma incorrecto".to_string());
+                    }
+
+                    let r = BigUint::from_bytes_be(&bytes_message[0..32]);
+                    let s = BigUint::from_bytes_be(&bytes_message[32..64]);
+
+                    let asn1 = ASN1Block::Sequence(
+                        0,
+                        vec![
+                            ASN1Block::Integer(0, r.into()),
+                            ASN1Block::Integer(0, s.into()),
+                        ],
+                    );
+
+                    let der = to_der(&asn1)
+                        .map_err(|_| Error::Other("Error convirtiendo a der".to_string()))
+                        .unwrap();
+                    Ok(Signature::from(der))
+                } else {
+                    println!("Hash del mensaje a firmar = {}", str_hash);
+                    let response = client
+                        .post(url_signature)
+                        .header(AUTHORIZATION, format!("Bearer {}", bearer_token))
+                        .json(&serde_json::json!({
+                            "userID": user_id,
+                            "credentialID": credential_id,
+                            "SAD": sad,
+                            "hashAlgorithmOID": hash_algorithm,
+                            "signAlgo": sign_algo,
+                            "hashes": [str_hash],
+                        }))
+                        .send()
+                        .map_err(|_| signature::Error::new())? // tu tipo de error
+                        .json::<Value>()
+                        .map_err(|_| Error::Other("".to_string()))?; // tu tipo de error
+
+                    let message = response["signatures"][0].as_str().unwrap();
+                    println!("Mensaje Firmado = {}", message);
+
+                    let bytes_message = STANDARD.decode(message).unwrap();
+                    println!("Tamanio Vector {}", bytes_message.len());
+
+                    if bytes_message.len() != 64 {
+                        Error::Other("No cumple el tamanio de la firma".to_string());
+                    }
+
+                    let r = BigUint::from_bytes_be(&bytes_message[0..32]);
+                    let s = BigUint::from_bytes_be(&bytes_message[32..64]);
+
+                    let asn1 = ASN1Block::Sequence(
+                        0,
+                        vec![
+                            ASN1Block::Integer(0, r.into()),
+                            ASN1Block::Integer(0, s.into()),
+                        ],
+                    );
+
+                    let der = to_der(&asn1)
+                        .map_err(|_| Error::Other("Error convirtiendo a der".to_string()))
+                        .unwrap();
+
+                    let base64 = STANDARD.encode(&der);
+                    println!("Der de la firma = {}", base64);
+                    Ok(Signature::from(der))
+                }
             }
-            Self::Ed25519(kp) => {
+            Self::Ed25519(_kp) => {
                 // let signature = kp.ring_pair.sign(msg);
 
                 // Ok(Signature::from(signature.as_ref().to_vec()))
                 let vec: Vec<u8> = vec![0];
                 // Ok(vec)
                 // Box::pin(async move {
-                    // tu lógica de firma remota aquí
-                    Ok((Signature::from(vec), vec![0])) //
-                // })
+                // tu lógica de firma remota aquí
+                Ok(Signature::from(vec)) //
+                                         // })
             }
         }
     }
