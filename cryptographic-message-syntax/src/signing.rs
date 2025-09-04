@@ -28,6 +28,7 @@ use {
     std::{collections::HashSet, fs::File, io::Write},
     x509_certificate::{
         asn1time::UtcTime,
+        ess_signing_certificate_v2::build_ess_signing_cert_v2,
         rfc5652::{Attribute, AttributeValue},
         CapturedX509Certificate, DigestAlgorithm, KeyInfoSigner, SignatureAlgorithm,
     },
@@ -337,8 +338,10 @@ impl<'a> SignedDataBuilder<'a> {
             None => return Err(CmsError::NoSignedAttributes),
         };
 
+        let mut current_cert: Vec<u8> = vec![];
         seen_digest_algorithms.insert(signer.digest_algorithm);
         if let Some(signing_certificate) = &signer.signing_certificate {
+            current_cert = signing_certificate.encode_der()?;
             if !seen_certificates.iter().any(|x| x == signing_certificate) {
                 seen_certificates.push(signing_certificate.clone());
             }
@@ -383,13 +386,16 @@ impl<'a> SignedDataBuilder<'a> {
             ))],
         });
 
+        let ess_result = build_ess_signing_cert_v2(&current_cert);
         // build_es
         // Add essSigningCertificateV2
         signed_attributes.push(Attribute {
-            typ: Oid(Bytes::copy_from_slice(Oid(&[42, 134, 72, 134, 247, 13, 1, 9, 16, 2, 47]).as_ref())),
+            typ: Oid(Bytes::copy_from_slice(
+                Oid(&[42, 134, 72, 134, 247, 13, 1, 9, 16, 2, 47]).as_ref(),
+            )),
             values: vec![AttributeValue::new(Captured::from_values(
                 Mode::Der,
-                self.signing_time.clone().encode(),
+                ess_result.encode_ref(),
             ))],
         });
 
