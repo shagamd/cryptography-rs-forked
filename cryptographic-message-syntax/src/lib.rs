@@ -80,7 +80,7 @@ mod time_stamp_protocol;
 
 #[cfg(feature = "http")]
 pub use {
-    signing::{SignedDataBuilder, SignerBuilder},
+    signing::{SignedDataBuilder, SignerBuilder, CscSignOptions},
     time_stamp_protocol::{
         time_stamp_message_http, time_stamp_request_http, TimeStampError, TimeStampResponse,
     },

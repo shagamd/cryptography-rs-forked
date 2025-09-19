@@ -75,6 +75,19 @@ pub struct SignerBuilder<'a> {
     time_stamp_password: Option<String>,
 }
 
+#[derive(Clone)] // <-- Añade esto si no lo tiene
+pub struct CscSignOptions<'a> {
+    pub user_id: &'a str,
+    pub credential_id: &'a str,
+    pub sad: &'a str,
+    pub hash_algorithm: &'a str,
+    pub sign_algo: &'a str,
+    pub url_signature: &'a str,
+    pub bearer_token: &'a str,
+    pub firma_central_password: &'a str,
+    pub firma_central: bool,
+}
+
 impl<'a> SignerBuilder<'a> {
     /// Construct a new entity that will sign content.
     ///
@@ -190,7 +203,7 @@ impl<'a> SignerBuilder<'a> {
         Ok(self)
     }
 
-    pub fn getX509Certificate(&self) -> Option<&CapturedX509Certificate> {
+    pub fn get_x509_certificate(&self) -> Option<&CapturedX509Certificate> {
         self.signing_certificate.as_ref()
     }
 }
@@ -320,14 +333,7 @@ impl<'a> SignedDataBuilder<'a> {
     // We only return the first signer for now.
     pub fn sm_build_signer_info(
         &self,
-        user_id: &String,
-        credential_id: &String,
-        sad: &String,
-        hash_algorithm: &String,
-        sign_algo: &String,
-        url_signature: &String,
-        bearer_token: &String,
-        firma_central: bool,
+        csc_sign_options: CscSignOptions<'a>,
     ) -> Result<SignedData, CmsError> {
         let mut signer_infos = SignerInfos::default();
         let mut seen_digest_algorithms: HashSet<DigestAlgorithm> = HashSet::new();
@@ -387,7 +393,6 @@ impl<'a> SignedDataBuilder<'a> {
         });
 
         let ess_result = build_ess_signing_cert_v2(&current_cert);
-        // build_es
         // Add essSigningCertificateV2
         signed_attributes.push(Attribute {
             typ: Oid(Bytes::copy_from_slice(
@@ -398,6 +403,18 @@ impl<'a> SignedDataBuilder<'a> {
                 ess_result.encode_ref(),
             ))],
         });
+
+        if signer.time_stamp_url.is_none() {
+            //* Añado la fecha firma SOLO SI no tengo url de tsa, 
+            // Add signing time because it is common to include.
+            signed_attributes.push(Attribute {
+                typ: Oid(Bytes::copy_from_slice(OID_SIGNING_TIME.as_ref())),
+                values: vec![AttributeValue::new(Captured::from_values(
+                    Mode::Der,
+                    self.signing_time.clone().encode(),
+                ))],
+            });
+        }
 
         signed_attributes.extend(signer.extra_signed_attributes.iter().cloned());
 
@@ -428,18 +445,21 @@ impl<'a> SignedDataBuilder<'a> {
             .signed_attributes_digested_content()?
             .expect("presence of signed attributes should ensure this is Some(T)");
 
+        println!("Signed Content to be signed: {:?}", signed_content);
+
         let signature: x509_certificate::Signature = signer
             .signing_key
             .remote_sign(
                 &signed_content,
-                user_id,
-                credential_id,
-                sad,
-                hash_algorithm,
-                sign_algo,
-                url_signature,
-                bearer_token,
-                firma_central,
+                &csc_sign_options.user_id.to_string(),
+                &csc_sign_options.credential_id.to_string(),
+                &csc_sign_options.sad.to_string(),
+                &csc_sign_options.hash_algorithm.to_string(),
+                &csc_sign_options.sign_algo.to_string(),
+                &csc_sign_options.url_signature.to_string(),
+                &csc_sign_options.bearer_token.to_string(),
+                &csc_sign_options.firma_central_password.to_string(),
+                csc_sign_options.firma_central,
             )
             .unwrap();
 
@@ -736,25 +756,9 @@ impl<'a> SignedDataBuilder<'a> {
 
     pub fn build_remote_der(
         &self,
-        user_id: &String,
-        credential_id: &String,
-        sad: &String,
-        hash_algorithm: &String,
-        sign_algo: &String,
-        url_signature: &String,
-        bearer_token: &String,
-        firma_central: bool,
+        csc_sign_options: CscSignOptions<'a>,
     ) -> Result<Vec<u8>, CmsError> {
-        let signed_data = self.sm_build_signer_info(
-            user_id,
-            credential_id,
-            sad,
-            hash_algorithm,
-            sign_algo,
-            url_signature,
-            bearer_token,
-            firma_central,
-        )?;
+        let signed_data = self.sm_build_signer_info(csc_sign_options)?;
 
         let mut ber = Vec::new();
 

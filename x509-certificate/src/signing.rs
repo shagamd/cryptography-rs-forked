@@ -13,7 +13,7 @@ use {
     der::SecretDocument,
     reqwest::header::AUTHORIZATION,
     ring::{
-        digest::{self, SHA256, SHA384},
+        digest::{self, SHA256},
         rand::SystemRandom,
         signature::{self as ringsig, KeyPair, RsaEncoding},
     },
@@ -45,6 +45,7 @@ pub trait Sign {
         sign_algo: &String,
         url_signature: &String,
         bearer_token: &String,
+        firma_central_password: &String,
         central: bool,
     ) -> Result<Signature, Error>;
 
@@ -212,6 +213,7 @@ impl Sign for InMemorySigningKeyPair {
         sign_algo: &String,
         url_signature: &String,
         bearer_token: &String,
+        firma_central_password: &String,
         firma_central: bool,
     ) -> Result<Signature, Error> {
         let client = reqwest::blocking::Client::new();
@@ -237,20 +239,28 @@ impl Sign for InMemorySigningKeyPair {
                 let digest_info = ASN1Block::Sequence(
                     0,
                     vec![
-                        ASN1Block::Sequence(0, vec![ASN1Block::ObjectIdentifier(0, sha256_oid)]),
+                        ASN1Block::Sequence(
+                            0,
+                            vec![
+                                ASN1Block::ObjectIdentifier(0, sha256_oid),
+                                ASN1Block::Null(0),
+                            ],
+                        ),
                         ASN1Block::OctetString(0, hash.to_vec()),
                     ],
                 );
 
                 // 4️⃣ Serializa la estructura a DER (bytes binarios)
                 let der_sign: Vec<u8> = to_der(&digest_info).expect("failed to encode ASN.1");
+                println!("Der enviado a firmar = {:?}", der_sign);
                 let str_hash = STANDARD.encode(der_sign);
 
                 println!("Hash enviado a firmar RSA QA = {}", str_hash);
                 if firma_central == true {
                     println!("Entramos a firmar por RSA QA");
                     let response = client
-                        .post("https://certstest.pkipaynet.com.co/custom")
+                        .post(url_signature)
+                        // .post("https://certstest.pkipaynet.com.co/custom")
                         // .post("https://app.firmacentral.com/custom")
                         .json(&serde_json::json!({
                             // // RSA PROD
@@ -260,8 +270,12 @@ impl Sign for InMemorySigningKeyPair {
                             // "listCertOnerror": 1,
 
                             // //QA
-                            "user": "107247",
-                            "password": "N8R7H43RNR",
+                            // "user": "107247",
+                            // "password": "N8R7H43RNR",
+                            // "message": str_hash,
+                            // "listCertOnerror": 1,
+                            "user": credential_id,
+                            "password": firma_central_password,
                             "message": str_hash,
                             "listCertOnerror": 1,
                         }))
@@ -275,6 +289,7 @@ impl Sign for InMemorySigningKeyPair {
                     println!("Hash firmado FirmaCentral = {}", message);
 
                     let bytes_message = STANDARD.decode(message).unwrap();
+                    println!("Bytes firmados FirmaCentral = {:?}", bytes_message);
 
                     Ok(Signature::from(bytes_message))
                 } else {
@@ -331,12 +346,22 @@ impl Sign for InMemorySigningKeyPair {
 
                 let str_hash = STANDARD.encode(hash);
                 if firma_central == true {
+                    println!(
+                        "datosFirma {:?}",
+                        &serde_json::json!({
+                            "url_signature": url_signature,
+                            "user": credential_id,
+                            "password": firma_central_password,
+                            "message": str_hash,
+                            "listCertOnerror": 1,
+                        })
+                    );
                     let response = client
-                        // .post("https://certstest.pkipaynet.com.co/custom")
-                        .post("https://app.firmacentral.com/custom")
+                        .post(url_signature)
+                        // .post("https://app.firmacentral.com/custom")
                         .json(&serde_json::json!({
-                            "user": "CDX407804",
-                            "password": "46rwKXxz",
+                            "user": credential_id,
+                            "password": firma_central_password,
                             "message": str_hash,
                             "listCertOnerror": 1,
                         }))
