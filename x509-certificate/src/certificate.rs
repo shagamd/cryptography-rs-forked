@@ -551,8 +551,15 @@ impl CapturedX509Certificate {
             .subject_public_key_info
             .subject_public_key
             .octet_bytes();
+        let algo_identifier = &other
+            .as_ref()
+            .0
+            .tbs_certificate
+            .subject_public_key_info
+            .algorithm;
+        let key_algorithm = KeyAlgorithm::try_from(algo_identifier).unwrap();
 
-        self.verify_signed_by_public_key(public_key)
+        self.verify_signed_by_public_key(public_key, key_algorithm)
     }
 
     /// Verify a signature over signed data purportedly signed by this certificate.
@@ -605,6 +612,7 @@ impl CapturedX509Certificate {
     pub fn verify_signed_by_public_key(
         &self,
         public_key_data: impl AsRef<[u8]>,
+        key_algorithm_from_parent: KeyAlgorithm,
     ) -> Result<(), Error> {
         // Always verify against the original content, as the inner
         // certificate could be mutated via the mutable wrapper of this
@@ -623,16 +631,10 @@ impl CapturedX509Certificate {
             .expect("original certificate data should have persisted as part of re-parse");
         let signature = this_cert.0.signature.octet_bytes();
 
-        let key_algorithm = KeyAlgorithm::try_from(
-            &this_cert
-                .0
-                .tbs_certificate
-                .subject_public_key_info
-                .algorithm,
-        )?;
         let signature_algorithm = SignatureAlgorithm::try_from(&this_cert.0.signature_algorithm)?;
 
-        let verify_algorithm = signature_algorithm.resolve_verification_algorithm(key_algorithm)?;
+        let verify_algorithm =
+            signature_algorithm.resolve_verification_algorithm(key_algorithm_from_parent)?;
 
         let public_key = ringsig::UnparsedPublicKey::new(verify_algorithm, public_key_data);
 
