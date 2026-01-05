@@ -648,10 +648,6 @@ impl<'a> SignedDataBuilder<'a> {
                 .expect("presence of signed attributes should ensure this is Some(T)");
 
             let signature = signer.signing_key.try_sign(&signed_content)?;
-            let mut pdf_file =
-                File::create("/Users/jonathan.munoz/Public/Rust/pdf_signing/local_sign.bin")
-                    .unwrap();
-            pdf_file.write_all(signature.clone().as_ref()).unwrap();
 
             let signature_algorithm = signer.signing_key.signature_algorithm()?;
 
